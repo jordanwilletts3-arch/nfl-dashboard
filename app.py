@@ -213,20 +213,34 @@ neutral = allp[(allp["down"] <= 2) & allp["wp"].between(0.2, 0.8)]
 ranks["pass_pct"] = (neutral.groupby("posteam")["play_type"].apply(lambda s: (s == "pass").mean()) * 100).round(0)
 
 # Red zone: share of plays inside the 20 that go for a touchdown (a play-level proxy, not per-trip)
-rz = allp.dropna(subset=["yardline_100", "touchdown"])
-rz = rz[rz["yardline_100"] <= 20]
-rz_off = rz.groupby("posteam")["touchdown"].mean() * 100
-rz_def = rz.groupby("defteam")["touchdown"].mean() * 100
-ranks["rz_off"] = rz_off.rank(ascending=False).astype(int)
-ranks["rz_def"] = rz_def.rank(ascending=True).astype(int)
+rz_subset = [c for c in ["yardline_100", "touchdown"] if c in allp.columns]
+if len(rz_subset) == 2:
+    rz = allp.dropna(subset=rz_subset)
+    rz = rz[rz["yardline_100"] <= 20]
+    rz_off = rz.groupby("posteam")["touchdown"].mean() * 100
+    rz_def = rz.groupby("defteam")["touchdown"].mean() * 100
+    ranks["rz_off"] = rz_off.rank(ascending=False).astype(int)
+    ranks["rz_def"] = rz_def.rank(ascending=True).astype(int)
+else:
+    rz_off = pd.Series(dtype=float)
+    rz_def = pd.Series(dtype=float)
+    ranks["rz_off"] = np.nan
+    ranks["rz_def"] = np.nan
 
 # Third down: conversion rate for and against
-td3 = allp.dropna(subset=["down", "first_down"])
-td3 = td3[td3["down"] == 3]
-td3_off = td3.groupby("posteam")["first_down"].mean() * 100
-td3_def = td3.groupby("defteam")["first_down"].mean() * 100
-ranks["td3_off"] = td3_off.rank(ascending=False).astype(int)
-ranks["td3_def"] = td3_def.rank(ascending=True).astype(int)
+td3_subset = [c for c in ["down", "first_down"] if c in allp.columns]
+if len(td3_subset) == 2:
+    td3 = allp.dropna(subset=td3_subset)
+    td3 = td3[td3["down"] == 3]
+    td3_off = td3.groupby("posteam")["first_down"].mean() * 100
+    td3_def = td3.groupby("defteam")["first_down"].mean() * 100
+    ranks["td3_off"] = td3_off.rank(ascending=False).astype(int)
+    ranks["td3_def"] = td3_def.rank(ascending=True).astype(int)
+else:
+    td3_off = pd.Series(dtype=float)
+    td3_def = pd.Series(dtype=float)
+    ranks["td3_off"] = np.nan
+    ranks["td3_def"] = np.nan
 
 # Keep the raw percentages too, for a plainer display alongside the ranks
 raw_pct = pd.DataFrame({
@@ -248,7 +262,7 @@ g["model"] = g["base_model"] + g["div_adj"]
 g["gap"] = g["model"] - g["spread_line"]
 
 log = log_predictions(g[["season", "week", "gameday", "away_team", "home_team", "spread_line", "model"]]
-                       .rename(columns={"model": "model_margin"}), SEASON, week)
+                      .rename(columns={"model": "model_margin"}), SEASON, week)
 log = fill_results(log, sched)
 
 st.title("NFL Week " + str(week))
@@ -368,7 +382,7 @@ with tab5:
         c1, c2 = st.columns(2)
         team_pick = c1.selectbox("Team", ["All"] + sorted(inj_players["team"].unique()))
         status_pick = c2.multiselect("Status", ["Out", "Doubtful", "Questionable"],
-                                      default=["Out", "Doubtful", "Questionable"])
+                                     default=["Out", "Doubtful", "Questionable"])
         view = inj_players[inj_players["status"].isin(status_pick)]
         if team_pick != "All":
             view = view[view["team"] == team_pick]
@@ -409,8 +423,8 @@ with tab6:
             if pos_key and opp in def_ranks[pos_key].index:
                 rank = int(def_ranks[pos_key][opp])
                 c2.metric(opp + " vs " + pos_key + " (rank, last 4)", "{} of 32".format(rank),
-                           help="1 = toughest matchup (fewest yards allowed to this position), "
-                                "32 = easiest matchup.")
+                          help="1 = toughest matchup (fewest yards allowed to this position), "
+                               "32 = easiest matchup.")
             else:
                 c2.metric("Opponent matchup", "n/a", help="Not enough data yet for this position or team.")
 
