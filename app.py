@@ -21,16 +21,24 @@ DIV_ADJ = 4.0  # points shaved off the model's margin for division games — bac
 
 @st.cache_data(ttl=6 * 3600, show_spinner="Loading player stats...")
 def load_player_stats(season):
-    """Each player's rolling 4-game average, as of right now, for rec yards / rush yards / receptions.
-    This is a plain rolling average — tested against an opponent-adjusted version and it did not help
-    (see notes), so no defensive adjustment is applied here.
+    """Each player's rolling 4-game average, as of right now, for rec yards / rush yards / receptions
+    (a plain rolling average — tested against an opponent-adjusted version and it did not help, so no
+    defensive adjustment is folded into this number), plus each defence's rank against that player's
+    position over its last 4 games, shown separately as context rather than baked into the projection.
     """
     raw = nfl.load_pbp([season - 1, season]).select(
-        ["season", "week", "season_type", "play_type", "posteam", "rusher_player_id", "rusher_player_name",
-         "receiver_player_id", "receiver_player_name", "yards_gained", "complete_pass"]
+        ["season", "week", "season_type", "play_type", "posteam", "defteam",
+         "rusher_player_id", "rusher_player_name", "receiver_player_id", "receiver_player_name",
+         "yards_gained", "complete_pass"]
     ).to_pandas()
     raw = raw[raw["season_type"] == "REG"].copy()
     raw["idx"] = raw["season"] * 18 + raw["week"]
+
+    try:
+        pos = nfl.load_players().to_pandas()[["gsis_id", "position"]].dropna().drop_duplicates("gsis_id")
+        pos_map = pos.set_index("gsis_id")["position"]
+    except Exception:
+        pos_map = pd.Series(dtype=object)
 
     def rolling_avg(df, id_col, name_col, value_col, label):
         d = df.dropna(subset=[id_col]).groupby([id_col, name_col, "posteam", "idx"])[value_col].sum().reset_index()
@@ -38,7 +46,8 @@ def load_player_stats(season):
         d["avg"] = d.groupby(id_col)[value_col].transform(lambda s: s.rolling(4, min_periods=1).mean())
         last = d.groupby(id_col).tail(1).copy()
         last["stat"] = label
-        return last.rename(columns={name_col: "player", "posteam": "team"})[["player", "team", "stat", "avg"]]
+        last["position"] = last[id_col].map(pos_map)
+        return last.rename(columns={name_col: "player", "posteam": "team"})[["player", "team", "position", "stat", "avg"]]
 
     run = raw[raw["play_type"] == "run"]
     rec = raw[raw["play_type"] == "pass"].copy()
@@ -49,7 +58,29 @@ def load_player_stats(season):
         rolling_avg(rec, "receiver_player_id", "receiver_player_name", "yards_gained", "Receiving yards"),
         rolling_avg(rec, "receiver_player_id", "receiver_player_name", "catch", "Receptions"),
     ])
-    return out.dropna(subset=["player"]).sort_values(["stat", "player"])
+    out = out.dropna(subset=["player"]).sort_values(["stat", "player"])
+
+    # Defence vs position group: yards allowed per game to WR/TE/RB, last 4 games, ranked 1 (stingiest) to 32
+    rec_pos = rec.dropna(subset=["receiver_player_id"]).copy()
+    rec_pos["position"] = rec_pos["receiver_player_id"].map(pos_map)
+    run_pos = run.dropna(subset=["rusher_player_id"]).copy()
+    run_pos["position"] = run_pos["rusher_player_id"].map(pos_map)
+    run_pos["defteam"] = run.loc[run_pos.index, "defteam"]
+
+    def def_rank(df, positions):
+        d = df[df["position"].isin(positions)]
+        per_game = d.groupby(["defteam", "idx"])["yards_gained"].sum().reset_index().sort_values(["defteam", "idx"])
+        per_game["last4"] = per_game.groupby("defteam")["yards_gained"].transform(
+            lambda s: s.rolling(4, min_periods=1).mean())
+        latest = per_game.groupby("defteam").tail(1).set_index("defteam")["last4"]
+        return latest.rank(ascending=True).astype(int)  # 1 = fewest yards allowed = toughest matchup
+
+    def_ranks = {
+        "RB": def_rank(run_pos, ["RB", "FB"]),
+        "WR": def_rank(rec_pos, ["WR"]),
+        "TE": def_rank(rec_pos, ["TE"]),
+    }
+    return out, def_ranks
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner="Loading NFL data...")
@@ -308,11 +339,12 @@ with tab5:
         st.dataframe(view, hide_index=True, use_container_width=True)
 
 with tab6:
-    st.caption("Each player's rolling 4-game average for the stat you pick, based on their most recent games "
-               "(includes last season early on, weighted equally — no opponent adjustment, since testing showed "
-               "it didn't improve on a plain average). This is an estimate to compare against a bookmaker's "
-               "prop line yourself, not a tip, and single-game player stats are naturally noisy.")
-    props = load_player_stats(SEASON)
+    st.caption("Each player's rolling 4-game average for the stat you pick (no opponent adjustment — testing "
+               "showed it didn't improve on a plain average, so it isn't folded into this number). The "
+               "opponent's rank against that position over its last 4 games is shown separately as context "
+               "you can weigh yourself, the same way the Matchups tab works for the spread. Neither is a tip, "
+               "and single-game player stats are naturally noisy.")
+    props, def_ranks = load_player_stats(SEASON)
     if props.empty:
         st.info("No player stats available yet.")
     else:
@@ -326,13 +358,29 @@ with tab6:
         if search:
             rows = rows[rows["player"].str.contains(search, case=False, na=False)]
         rows = rows.sort_values("avg", ascending=False).rename(columns={"avg": "Last-4-game average"})
-        st.dataframe(rows[["player", "team", "Last-4-game average"]].round(1),
+        st.dataframe(rows[["player", "team", "position", "Last-4-game average"]].round(1),
                      hide_index=True, use_container_width=True)
-        st.caption("Enter a bookmaker's line below to compare it against the highlighted player's average.")
+
+        st.caption("Pick a player and their upcoming opponent to see the matchup context alongside their average.")
         if not rows.empty:
-            chosen = st.selectbox("Compare a player", rows["player"])
+            chosen = st.selectbox("Player", rows["player"])
+            prow = rows[rows["player"] == chosen].iloc[0]
+            opp = st.selectbox("This week's opponent", sorted(net.index))
+            pos_key = prow["position"] if prow["position"] in def_ranks else None
+
+            c1, c2 = st.columns(2)
+            c1.metric(prow["stat"] + " (last 4)", "{:.1f}".format(prow["Last-4-game average"]))
+            if pos_key and opp in def_ranks[pos_key].index:
+                rank = int(def_ranks[pos_key][opp])
+                c2.metric(opp + " vs " + pos_key + " (rank, last 4)", "{} of 32".format(rank),
+                           help="1 = toughest matchup (fewest yards allowed to this position), "
+                                "32 = easiest matchup.")
+            else:
+                c2.metric("Opponent matchup", "n/a", help="Not enough data yet for this position or team.")
+
+            st.caption("Enter a bookmaker's line to compare it against the average above (the average, "
+                       "not the matchup rank, is the tested number).")
             line = st.number_input("Bookmaker's prop line", min_value=0.0, step=0.5)
-            avg = rows.loc[rows["player"] == chosen, "Last-4-game average"].iloc[0]
             if line > 0:
-                st.metric("Model average vs line", "{:+.1f}".format(avg - line),
-                          delta="{} the line".format("Over" if avg > line else "Under"))
+                st.metric("Average vs line", "{:+.1f}".format(prow["Last-4-game average"] - line),
+                          delta="{} the line".format("Over" if prow["Last-4-game average"] > line else "Under"))
