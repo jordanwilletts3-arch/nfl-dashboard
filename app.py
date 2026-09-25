@@ -52,7 +52,8 @@ def load_player_stats(season):
     return out.dropna(subset=["player"]).sort_values(["stat", "player"])
 
 
-
+@st.cache_data(ttl=6 * 3600, show_spinner="Loading NFL data...")
+def load(season):
     pbp = nfl.load_pbp([season - 1, season]).select(COLS).to_pandas()
     sched = nfl.load_schedules(season).to_pandas()
     try:
