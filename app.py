@@ -88,6 +88,12 @@ st.caption("Context for reading games, not betting tips. In backtests the model 
 tab1, tab2, tab3 = st.tabs(["Games", "Matchups", "Teams"])
 
 with tab1:
+    sort_by = st.radio("Sort by", ["Date", "Points difference to spread"], horizontal=True)
+    if sort_by == "Date":
+        g = g.sort_values("gameday")
+    else:
+        g = g.reindex(g["gap"].abs().sort_values(ascending=False, na_position="last").index)
+
     for _, r in g.iterrows():
         a, h = r["away_team"], r["home_team"]
         with st.container(border=True):
