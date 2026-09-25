@@ -83,8 +83,6 @@ g["model"] = (g["home_team"].map(net) - g["away_team"].map(net)) * 63 + 1.5
 g["gap"] = g["model"] - g["spread_line"]
 
 st.title("NFL Week " + str(week))
-st.caption("Context for reading games, not betting tips. In backtests the model did not beat "
-           "bookmaker lines, so treat a gap as a prompt to check injury and lineup news.")
 tab1, tab2, tab3 = st.tabs(["Games", "Matchups", "Teams"])
 
 with tab1:
