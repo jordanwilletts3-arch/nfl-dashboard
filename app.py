@@ -55,6 +55,21 @@ def injury_counts(injuries, week, season):
     return out
 
 
+def injury_players(injuries, week, season):
+    """Every player with a report this week, one row per player, for the detail view and search tab."""
+    if injuries.empty:
+        return pd.DataFrame()
+    wk = injuries[(injuries["season"] == season) & (injuries["week"] == week)].copy()
+    if wk.empty:
+        return pd.DataFrame()
+    name_col = "full_name" if "full_name" in wk.columns else "player_name"
+    keep = wk[[name_col, "team", "position", "report_status", "practice_status"]].rename(
+        columns={name_col: "player", "report_status": "status", "practice_status": "practice"})
+    order = {"Out": 0, "Doubtful": 1, "Questionable": 2}
+    keep["_ord"] = keep["status"].map(order).fillna(3)
+    return keep.sort_values(["team", "_ord", "player"]).drop(columns="_ord")
+
+
 def log_predictions(g, season, week):
     """Append this week's predictions to the log once, skipping games already logged."""
     cols = ["season", "week", "gameday", "away_team", "home_team", "spread_line", "model_margin"]
@@ -133,6 +148,7 @@ neutral = allp[(allp["down"] <= 2) & allp["wp"].between(0.2, 0.8)]
 ranks["pass_pct"] = (neutral.groupby("posteam")["play_type"].apply(lambda s: (s == "pass").mean()) * 100).round(0)
 
 inj = injury_counts(injuries, week, SEASON)
+inj_players = injury_players(injuries, week, SEASON)
 
 # This week's games
 g = todo[todo["week"] == week].copy().sort_values("gameday")
@@ -149,7 +165,7 @@ log = log_predictions(g[["season", "week", "gameday", "away_team", "home_team", 
 log = fill_results(log, sched)
 
 st.title("NFL Week " + str(week))
-tab1, tab2, tab3, tab4 = st.tabs(["Games", "Matchups", "Teams", "Track record"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Games", "Matchups", "Teams", "Track record", "Injuries"])
 
 with tab1:
     sort_by = st.radio("Sort by", ["Date", "Points difference to spread"], horizontal=True)
@@ -190,6 +206,12 @@ with tab1:
                 if a_off + a_def + h_off + h_def > 0:
                     st.caption("Out/doubtful — {}: {} offence, {} defence. {}: {} offence, {} defence.".format(
                         a, a_off, a_def, h, h_off, h_def))
+
+            if not inj_players.empty:
+                game_players = inj_players[inj_players["team"].isin([a, h])]
+                if not game_players.empty:
+                    with st.expander("Player-by-player injury report ({} listed)".format(len(game_players))):
+                        st.dataframe(game_players, hide_index=True, use_container_width=True)
 
 with tab2:
     st.caption("A plus number means that offence ranks better than the defence it faces.")
@@ -235,3 +257,18 @@ with tab4:
             .sort_values(["week", "gameday"], ascending=[False, False]),
             hide_index=True, use_container_width=True,
         )
+
+with tab5:
+    st.caption("This week's full injury report, every team. Context to read alongside the games above — "
+               "it isn't used by the model.")
+    if inj_players.empty:
+        st.info("No injury report published for this week yet.")
+    else:
+        c1, c2 = st.columns(2)
+        team_pick = c1.selectbox("Team", ["All"] + sorted(inj_players["team"].unique()))
+        status_pick = c2.multiselect("Status", ["Out", "Doubtful", "Questionable"],
+                                      default=["Out", "Doubtful", "Questionable"])
+        view = inj_players[inj_players["status"].isin(status_pick)]
+        if team_pick != "All":
+            view = view[view["team"] == team_pick]
+        st.dataframe(view, hide_index=True, use_container_width=True)
