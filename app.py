@@ -1,4 +1,6 @@
 import datetime as dt
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -11,13 +13,29 @@ today = dt.date.today()
 SEASON = today.year if today.month >= 3 else today.year - 1
 COLS = ["season", "week", "season_type", "play_type", "epa", "wp", "posteam",
         "defteam", "success", "yards_gained", "down", "game_id"]
+LOG_PATH = Path("predictions_log.csv")
+
+# Rough time zone offset from Eastern, by team (for the travel adjustment)
+TZ = {
+    "BUF": 0, "MIA": 0, "NE": 0, "NYJ": 0, "NYG": 0, "PHI": 0, "PIT": 0, "BAL": 0,
+    "WAS": 0, "JAX": 0, "IND": 0, "DET": 0, "CIN": 0, "CLE": 0, "ATL": 0, "CAR": 0, "TB": 0,
+    "CHI": 1, "GB": 1, "MIN": 1, "DAL": 1, "HOU": 1, "NO": 1, "TEN": 1, "KC": 1,
+    "DEN": 2, "ARI": 2,
+    "SEA": 3, "SF": 3, "LA": 3, "LAC": 3, "LV": 3,
+}
+DIV_ADJ = 1.0    # points shaved off the model's margin for division games (untested, see caption)
+TRAVEL_ADJ = 0.3  # points per time zone crossed, applied against the travelling (away) team
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner="Loading NFL data...")
 def load(season):
     pbp = nfl.load_pbp([season - 1, season]).select(COLS).to_pandas()
     sched = nfl.load_schedules(season).to_pandas()
-    return pbp, sched
+    try:
+        injuries = nfl.load_injuries([season - 1, season]).to_pandas()
+    except Exception:
+        injuries = pd.DataFrame()
+    return pbp, sched, injuries
 
 
 def fav(a, h, m):
@@ -28,7 +46,53 @@ def fav(a, h, m):
     return "{} -{:.1f}".format(h if m > 0 else a, abs(m))
 
 
-pbp, sched = load(SEASON)
+def injury_counts(injuries, week, season):
+    """Count 'Out' and 'Doubtful' players per team for a given week, split offence/defence."""
+    if injuries.empty:
+        return pd.DataFrame()
+    off_pos = {"QB", "RB", "WR", "TE", "T", "G", "C", "OL", "FB"}
+    wk = injuries[(injuries["season"] == season) & (injuries["week"] == week)].copy()
+    if wk.empty:
+        return pd.DataFrame()
+    wk["side"] = np.where(wk["position"].isin(off_pos), "off", "def")
+    wk["flag"] = wk["report_status"].isin(["Out", "Doubtful"])
+    out = wk[wk["flag"]].groupby(["team", "side"]).size().unstack(fill_value=0)
+    for c in ["off", "def"]:
+        if c not in out.columns:
+            out[c] = 0
+    return out
+
+
+def log_predictions(g, season, week):
+    """Append this week's predictions to the log once, skipping games already logged."""
+    cols = ["season", "week", "gameday", "away_team", "home_team", "spread_line", "model_margin"]
+    new_rows = g.rename(columns={"model": "model_margin"})[cols].copy()
+    if LOG_PATH.exists():
+        existing = pd.read_csv(LOG_PATH)
+        key = ["season", "week", "away_team", "home_team"]
+        already = existing.set_index(key).index
+        new_rows = new_rows[~new_rows.set_index(key).index.isin(already)]
+        if not new_rows.empty:
+            new_rows["result"] = np.nan
+            existing = pd.concat([existing, new_rows], ignore_index=True)
+    else:
+        new_rows["result"] = np.nan
+        existing = new_rows
+    existing.to_csv(LOG_PATH, index=False)
+    return existing
+
+
+def fill_results(log, sched):
+    """Fill in final results for logged games that have since been played."""
+    done = sched.dropna(subset=["result"])[["season", "week", "away_team", "home_team", "result"]]
+    log = log.drop(columns=["result"]).merge(
+        done, on=["season", "week", "away_team", "home_team"], how="left"
+    )
+    log.to_csv(LOG_PATH, index=False)
+    return log
+
+
+pbp, sched, injuries = load(SEASON)
 todo = sched[sched["result"].isna() & (sched["game_type"] == "REG")]
 if todo.empty:
     st.info("No upcoming regular-season games right now.")
@@ -72,18 +136,32 @@ prof = profile("posteam", "off_").join(profile("defteam", "def_"))
 ranks = pd.DataFrame(index=prof.index)
 for c in prof.columns:
     ranks[c] = prof[c].rank(ascending=c.startswith("def_")).astype(int)
-rank_cols = list(ranks.columns)
 ranks["plays_pg"] = (allp.groupby("posteam").size() / allp.groupby("posteam")["game_id"].nunique()).round(1)
 neutral = allp[(allp["down"] <= 2) & allp["wp"].between(0.2, 0.8)]
 ranks["pass_pct"] = (neutral.groupby("posteam")["play_type"].apply(lambda s: (s == "pass").mean()) * 100).round(0)
 
+inj = injury_counts(injuries, week, SEASON)
+
 # This week's games
 g = todo[todo["week"] == week].copy().sort_values("gameday")
-g["model"] = (g["home_team"].map(net) - g["away_team"].map(net)) * 63 + 1.5
+g["base_model"] = (g["home_team"].map(net) - g["away_team"].map(net)) * 63 + 1.5
+
+div_col = "div_game" if "div_game" in g.columns else None
+g["div_adj"] = np.where(g[div_col] == 1, np.sign(-g["base_model"].fillna(0)) * DIV_ADJ, 0.0) if div_col else 0.0
+
+g["away_tz"] = g["away_team"].map(TZ)
+g["home_tz"] = g["home_team"].map(TZ)
+g["travel_adj"] = (g["away_tz"] - g["home_tz"]) * TRAVEL_ADJ  # positive = away team lost time zones, helps home
+
+g["model"] = g["base_model"] + g["div_adj"] + g["travel_adj"]
 g["gap"] = g["model"] - g["spread_line"]
 
+log = log_predictions(g[["season", "week", "gameday", "away_team", "home_team", "spread_line", "model"]]
+                       .rename(columns={"model": "model_margin"}), SEASON, week)
+log = fill_results(log, sched)
+
 st.title("NFL Week " + str(week))
-tab1, tab2, tab3 = st.tabs(["Games", "Matchups", "Teams"])
+tab1, tab2, tab3, tab4 = st.tabs(["Games", "Matchups", "Teams", "Track record"])
 
 with tab1:
     sort_by = st.radio("Sort by", ["Date", "Points difference to spread"], horizontal=True)
@@ -96,18 +174,37 @@ with tab1:
         a, h = r["away_team"], r["home_team"]
         with st.container(border=True):
             st.subheader(a + " at " + h)
-            st.caption(str(r["gameday"]))
+            tags = []
+            if div_col and r.get(div_col) == 1:
+                tags.append("Division game")
+            if abs(r["away_tz"] - r["home_tz"]) >= 2:
+                tags.append(str(int(abs(r["away_tz"] - r["home_tz"]))) + " time zones crossed")
+            st.caption(str(r["gameday"]) + (" — " + ", ".join(tags) if tags else ""))
+
             c1, c2, c3 = st.columns(3)
             c1.metric("Market", fav(a, h, r["spread_line"]))
             c2.metric("Model", fav(a, h, r["model"]))
             c3.metric("Total", "-" if pd.isna(r["total_line"]) else str(r["total_line"]))
+
             if pd.notna(r["gap"]):
                 st.write("Model vs market: {:.1f} pts toward {}".format(abs(r["gap"]), h if r["gap"] > 0 else a))
                 if abs(r["gap"]) >= 5:
                     st.warning("Big gap. Check injury and lineup news before trusting it.")
+
+            if r["div_adj"] != 0 or r["travel_adj"] != 0:
+                st.caption("Includes untested adjustments: division {:+.1f}, travel {:+.1f} pts.".format(
+                    r["div_adj"], r["travel_adj"]))
+
             st.caption("{} vs {}. Rest {} and {} days.".format(
                 r.get("away_qb_name", "?"), r.get("home_qb_name", "?"),
                 r.get("away_rest", "?"), r.get("home_rest", "?")))
+
+            if not inj.empty:
+                a_off, a_def = (inj.loc[a, "off"], inj.loc[a, "def"]) if a in inj.index else (0, 0)
+                h_off, h_def = (inj.loc[h, "off"], inj.loc[h, "def"]) if h in inj.index else (0, 0)
+                if a_off + a_def + h_off + h_def > 0:
+                    st.caption("Out/doubtful — {}: {} offence, {} defence. {}: {} offence, {} defence.".format(
+                        a, a_off, a_def, h, h_off, h_def))
 
 with tab2:
     st.caption("A plus number means that offence ranks better than the defence it faces.")
@@ -131,3 +228,25 @@ with tab3:
     view.columns = ["O pass", "O run", "O succ", "O expl", "D pass", "D run", "D succ", "D expl", "Plays", "Pass %"]
     st.dataframe(view.style.background_gradient(cmap="RdYlGn_r", vmin=1, vmax=32, subset=list(view.columns[:8])),
                  use_container_width=True)
+
+with tab4:
+    st.caption("Every prediction the model has made this season, checked against results once games finish. "
+               "This log lives on the app's own storage, so a redeploy or long period of inactivity can reset it.")
+    played = log.dropna(subset=["result"]).copy()
+    if played.empty:
+        st.info("No completed games logged yet this season. Check back once this week's games are played.")
+    else:
+        played["model_miss"] = (played["model_margin"] - played["result"]).abs()
+        played["book_miss"] = (played["spread_line"] - played["result"]).abs()
+        played["model_side_won"] = np.sign(played["model_margin"] - played["spread_line"]) == \
+            np.sign(played["result"] - played["spread_line"])
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Games tracked", len(played))
+        c2.metric("Model avg miss", "{:.2f}".format(played["model_miss"].mean()))
+        c3.metric("Bookmaker avg miss", "{:.2f}".format(played["book_miss"].mean()))
+        st.metric("Model side win rate", "{:.1f}%".format(played["model_side_won"].mean() * 100))
+        st.dataframe(
+            played[["week", "gameday", "away_team", "home_team", "spread_line", "model_margin", "result"]]
+            .sort_values(["week", "gameday"], ascending=[False, False]),
+            hide_index=True, use_container_width=True,
+        )
