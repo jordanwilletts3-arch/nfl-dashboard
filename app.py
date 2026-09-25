@@ -19,8 +19,40 @@ DIV_ADJ = 4.0  # points shaved off the model's margin for division games — bac
                # beat a random-games control, average miss improved from 10.36 to 10.18
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Loading NFL data...")
-def load(season):
+@st.cache_data(ttl=6 * 3600, show_spinner="Loading player stats...")
+def load_player_stats(season):
+    """Each player's rolling 4-game average, as of right now, for rec yards / rush yards / receptions.
+    This is a plain rolling average — tested against an opponent-adjusted version and it did not help
+    (see notes), so no defensive adjustment is applied here.
+    """
+    raw = nfl.load_pbp([season - 1, season]).select(
+        ["season", "week", "season_type", "play_type", "posteam", "rusher_player_id", "rusher_player_name",
+         "receiver_player_id", "receiver_player_name", "yards_gained", "complete_pass"]
+    ).to_pandas()
+    raw = raw[raw["season_type"] == "REG"].copy()
+    raw["idx"] = raw["season"] * 18 + raw["week"]
+
+    def rolling_avg(df, id_col, name_col, value_col, label):
+        d = df.dropna(subset=[id_col]).groupby([id_col, name_col, "posteam", "idx"])[value_col].sum().reset_index()
+        d = d.sort_values([id_col, "idx"])
+        d["avg"] = d.groupby(id_col)[value_col].transform(lambda s: s.rolling(4, min_periods=1).mean())
+        last = d.groupby(id_col).tail(1).copy()
+        last["stat"] = label
+        return last.rename(columns={name_col: "player", "posteam": "team"})[["player", "team", "stat", "avg"]]
+
+    run = raw[raw["play_type"] == "run"]
+    rec = raw[raw["play_type"] == "pass"].copy()
+    rec["catch"] = rec["complete_pass"].fillna(0)
+
+    out = pd.concat([
+        rolling_avg(run, "rusher_player_id", "rusher_player_name", "yards_gained", "Rushing yards"),
+        rolling_avg(rec, "receiver_player_id", "receiver_player_name", "yards_gained", "Receiving yards"),
+        rolling_avg(rec, "receiver_player_id", "receiver_player_name", "catch", "Receptions"),
+    ])
+    return out.dropna(subset=["player"]).sort_values(["stat", "player"])
+
+
+
     pbp = nfl.load_pbp([season - 1, season]).select(COLS).to_pandas()
     sched = nfl.load_schedules(season).to_pandas()
     try:
@@ -165,7 +197,8 @@ log = log_predictions(g[["season", "week", "gameday", "away_team", "home_team", 
 log = fill_results(log, sched)
 
 st.title("NFL Week " + str(week))
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Games", "Matchups", "Teams", "Track record", "Injuries"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["Games", "Matchups", "Teams", "Track record", "Injuries", "Player props"])
 
 with tab1:
     sort_by = st.radio("Sort by", ["Date", "Points difference to spread"], horizontal=True)
@@ -272,3 +305,33 @@ with tab5:
         if team_pick != "All":
             view = view[view["team"] == team_pick]
         st.dataframe(view, hide_index=True, use_container_width=True)
+
+with tab6:
+    st.caption("Each player's rolling 4-game average for the stat you pick, based on their most recent games "
+               "(includes last season early on, weighted equally — no opponent adjustment, since testing showed "
+               "it didn't improve on a plain average). This is an estimate to compare against a bookmaker's "
+               "prop line yourself, not a tip, and single-game player stats are naturally noisy.")
+    props = load_player_stats(SEASON)
+    if props.empty:
+        st.info("No player stats available yet.")
+    else:
+        c1, c2 = st.columns(2)
+        stat_pick = c1.selectbox("Stat", sorted(props["stat"].unique()))
+        team_filter = c2.selectbox("Team", ["All"] + sorted(props["team"].dropna().unique()), key="props_team")
+        rows = props[props["stat"] == stat_pick]
+        if team_filter != "All":
+            rows = rows[rows["team"] == team_filter]
+        search = st.text_input("Search player")
+        if search:
+            rows = rows[rows["player"].str.contains(search, case=False, na=False)]
+        rows = rows.sort_values("avg", ascending=False).rename(columns={"avg": "Last-4-game average"})
+        st.dataframe(rows[["player", "team", "Last-4-game average"]].round(1),
+                     hide_index=True, use_container_width=True)
+        st.caption("Enter a bookmaker's line below to compare it against the highlighted player's average.")
+        if not rows.empty:
+            chosen = st.selectbox("Compare a player", rows["player"])
+            line = st.number_input("Bookmaker's prop line", min_value=0.0, step=0.5)
+            avg = rows.loc[rows["player"] == chosen, "Last-4-game average"].iloc[0]
+            if line > 0:
+                st.metric("Model average vs line", "{:+.1f}".format(avg - line),
+                          delta="{} the line".format("Over" if avg > line else "Under"))
