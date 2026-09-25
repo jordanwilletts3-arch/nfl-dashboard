@@ -320,9 +320,22 @@ with tab3:
     st.caption("Ranks from 1 (best) to 32 (worst). O is offence, D is defence, Plays is per game, "
                "Pass % is passing share when the game is close.")
     view = ranks.sort_index()
+    view = view[["off_pass", "off_run", "off_succ", "off_expl", "def_pass", "def_run", "def_succ", "def_expl",
+                 "plays_pg", "pass_pct"]]
     view.columns = ["O pass", "O run", "O succ", "O expl", "D pass", "D run", "D succ", "D expl", "Plays", "Pass %"]
     st.dataframe(view.style.background_gradient(cmap="RdYlGn_r", vmin=1, vmax=32, subset=list(view.columns[:8])),
                  use_container_width=True)
+
+    st.subheader("Red zone and third down")
+    st.caption("Ranks from 1 (best) to 32 (worst). Red zone offence/defence is the share of plays inside the "
+               "20 that go for a touchdown, a play-level approximation rather than a per-trip conversion rate. "
+               "Third down is the conversion rate for and against. Context only, not used by the model.")
+    rz3 = ranks[["rz_off", "rz_def", "td3_off", "td3_def"]].sort_index()
+    rz3.columns = ["Red zone O", "Red zone D", "3rd down O", "3rd down D"]
+    st.dataframe(rz3.style.background_gradient(cmap="RdYlGn_r", vmin=1, vmax=32),
+                 use_container_width=True)
+    with st.expander("Show the underlying percentages"):
+        st.dataframe(raw_pct.sort_index().round(0), use_container_width=True)
 
 with tab4:
     st.caption("Every prediction the model has made this season, checked against results once games finish. "
