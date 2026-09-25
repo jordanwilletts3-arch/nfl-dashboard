@@ -12,7 +12,8 @@ st.set_page_config(page_title="NFL Week Dashboard", page_icon="🏈")
 today = dt.date.today()
 SEASON = today.year if today.month >= 3 else today.year - 1
 COLS = ["season", "week", "season_type", "play_type", "epa", "wp", "posteam",
-        "defteam", "success", "yards_gained", "down", "game_id"]
+        "defteam", "success", "yards_gained", "down", "game_id",
+        "ydstogo", "yardline_100", "touchdown", "first_down"]
 LOG_PATH = Path("predictions_log.csv")
 
 DIV_ADJ = 4.0  # points shaved off the model's margin for division games — backtested on 2022-2025,
@@ -210,6 +211,28 @@ for c in prof.columns:
 ranks["plays_pg"] = (allp.groupby("posteam").size() / allp.groupby("posteam")["game_id"].nunique()).round(1)
 neutral = allp[(allp["down"] <= 2) & allp["wp"].between(0.2, 0.8)]
 ranks["pass_pct"] = (neutral.groupby("posteam")["play_type"].apply(lambda s: (s == "pass").mean()) * 100).round(0)
+
+# Red zone: share of plays inside the 20 that go for a touchdown (a play-level proxy, not per-trip)
+rz = allp.dropna(subset=["yardline_100", "touchdown"])
+rz = rz[rz["yardline_100"] <= 20]
+rz_off = rz.groupby("posteam")["touchdown"].mean() * 100
+rz_def = rz.groupby("defteam")["touchdown"].mean() * 100
+ranks["rz_off"] = rz_off.rank(ascending=False).astype(int)
+ranks["rz_def"] = rz_def.rank(ascending=True).astype(int)
+
+# Third down: conversion rate for and against
+td3 = allp.dropna(subset=["down", "first_down"])
+td3 = td3[td3["down"] == 3]
+td3_off = td3.groupby("posteam")["first_down"].mean() * 100
+td3_def = td3.groupby("defteam")["first_down"].mean() * 100
+ranks["td3_off"] = td3_off.rank(ascending=False).astype(int)
+ranks["td3_def"] = td3_def.rank(ascending=True).astype(int)
+
+# Keep the raw percentages too, for a plainer display alongside the ranks
+raw_pct = pd.DataFrame({
+    "Red zone TD% (off)": rz_off.round(0), "Red zone TD% allowed (def)": rz_def.round(0),
+    "3rd down % (off)": td3_off.round(0), "3rd down % allowed (def)": td3_def.round(0),
+})
 
 inj = injury_counts(injuries, week, SEASON)
 inj_players = injury_players(injuries, week, SEASON)
