@@ -253,6 +253,7 @@ g["div_adj"] = np.where(g[div_col] == 1, np.sign(-g["base_model"].fillna(0)) * D
 
 g["model"] = g["base_model"] + g["div_adj"]
 g["gap"] = g["model"] - g["spread_line"]
+g_all = g.copy()  # kept unfiltered so each tab's kickoff-time filter works independently
 
 log = log_predictions(g[["season", "week", "gameday", "away_team", "home_team", "spread_line", "model"]]
                        .rename(columns={"model": "model_margin"}), SEASON, week)
@@ -263,18 +264,18 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["Games", "Matchups", "Teams", "Track record", "Injuries", "Player props"])
 
 with tab1:
-    times_available = sorted(g["kickoff"].unique())
+    times_available = sorted(g_all["kickoff"].unique())
     c1, c2 = st.columns([2, 1])
     sort_by = c1.radio("Sort by", ["Kickoff time", "Points difference to spread"], horizontal=True)
-    time_pick = c2.multiselect("Kickoff time", times_available, default=times_available)
+    time_pick = c2.multiselect("Kickoff time", times_available, default=times_available, key="games_time")
 
-    g = g[g["kickoff"].isin(time_pick)]
+    g1 = g_all[g_all["kickoff"].isin(time_pick)]
     if sort_by == "Kickoff time":
-        g = g.sort_values(["gameday", "kickoff"])
+        g1 = g1.sort_values(["gameday", "kickoff"])
     else:
-        g = g.reindex(g["gap"].abs().sort_values(ascending=False, na_position="last").index)
+        g1 = g1.reindex(g1["gap"].abs().sort_values(ascending=False, na_position="last").index)
 
-    for _, r in g.iterrows():
+    for _, r in g1.iterrows():
         a, h = r["away_team"], r["home_team"]
         with st.container(border=True):
             st.subheader(a + " at " + h)
@@ -316,13 +317,16 @@ with tab1:
 
 with tab2:
     st.caption("A plus number means that offence ranks better than the defence it faces.")
+    time_pick2 = st.multiselect("Kickoff time", times_available, default=times_available, key="matchups_time")
+    g2 = g_all[g_all["kickoff"].isin(time_pick2)].sort_values(["gameday", "kickoff"])
     m = pd.DataFrame({
-        "Game": g["away_team"] + " at " + g["home_team"],
-        "Away pass": g["home_team"].map(ranks["def_pass"]) - g["away_team"].map(ranks["off_pass"]),
-        "Away run": g["home_team"].map(ranks["def_run"]) - g["away_team"].map(ranks["off_run"]),
-        "Home pass": g["away_team"].map(ranks["def_pass"]) - g["home_team"].map(ranks["off_pass"]),
-        "Home run": g["away_team"].map(ranks["def_run"]) - g["home_team"].map(ranks["off_run"]),
-        "Plays": (g["away_team"].map(ranks["plays_pg"]) + g["home_team"].map(ranks["plays_pg"])).round(0),
+        "Game": g2["away_team"] + " at " + g2["home_team"],
+        "Kickoff": g2["gameday"].astype(str) + " " + g2["kickoff"],
+        "Away pass": g2["home_team"].map(ranks["def_pass"]) - g2["away_team"].map(ranks["off_pass"]),
+        "Away run": g2["home_team"].map(ranks["def_run"]) - g2["away_team"].map(ranks["off_run"]),
+        "Home pass": g2["away_team"].map(ranks["def_pass"]) - g2["home_team"].map(ranks["off_pass"]),
+        "Home run": g2["away_team"].map(ranks["def_run"]) - g2["home_team"].map(ranks["off_run"]),
+        "Plays": (g2["away_team"].map(ranks["plays_pg"]) + g2["home_team"].map(ranks["plays_pg"])).round(0),
     })
     edge_cols = ["Away pass", "Away run", "Home pass", "Home run"]
     st.dataframe(m.style.background_gradient(cmap="RdYlGn", vmin=-30, vmax=30, subset=edge_cols)
