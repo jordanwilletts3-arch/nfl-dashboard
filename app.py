@@ -184,7 +184,7 @@ X = np.hstack([
     pd.get_dummies(p["posteam"]).reindex(columns=teams, fill_value=0).astype(float).values,
     pd.get_dummies(p["defteam"]).reindex(columns=teams, fill_value=0).astype(float).values,
 ])
-model = Ridge(alpha=100).fit(X, p["epa"].values, sample_weight=p["w"].values)
+model = Ridge(alpha=500).fit(X, p["epa"].values, sample_weight=p["w"].values)
 net = pd.Series(model.coef_[:len(teams)] - model.coef_[len(teams):], index=teams)
 
 # Team profiles: pass, run, success and big plays, ranked 1 (best) to 32 (worst)
@@ -239,7 +239,9 @@ inj_players = injury_players(injuries, week, SEASON)
 
 # This week's games
 g = todo[todo["week"] == week].copy().sort_values("gameday")
-g["base_model"] = (g["home_team"].map(net) - g["away_team"].map(net)) * 63 + 1.5
+POINTS_PER_EPA = 47.57  # fitted on 2022 data, tested on 2023-2025 — replaces a guessed value of 63
+HOME_FIELD = 1.97        # fitted the same way — replaces a guessed value of 1.5
+g["base_model"] = (g["home_team"].map(net) - g["away_team"].map(net)) * POINTS_PER_EPA + HOME_FIELD
 
 div_col = "div_game" if "div_game" in g.columns else None
 g["div_adj"] = np.where(g[div_col] == 1, np.sign(-g["base_model"].fillna(0)) * DIV_ADJ, 0.0) if div_col else 0.0
