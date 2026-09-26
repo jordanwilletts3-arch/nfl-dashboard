@@ -238,7 +238,12 @@ inj = injury_counts(injuries, week, SEASON)
 inj_players = injury_players(injuries, week, SEASON)
 
 # This week's games
-g = todo[todo["week"] == week].copy().sort_values("gameday")
+g = todo[todo["week"] == week].copy()
+if "gametime" in g.columns:
+    g["kickoff"] = g["gametime"].fillna("TBD")
+else:
+    g["kickoff"] = "TBD"
+g = g.sort_values(["gameday", "kickoff"])
 POINTS_PER_EPA = 47.57  # fitted on 2022 data, tested on 2023-2025 — replaces a guessed value of 63
 HOME_FIELD = 1.97        # fitted the same way — replaces a guessed value of 1.5
 g["base_model"] = (g["home_team"].map(net) - g["away_team"].map(net)) * POINTS_PER_EPA + HOME_FIELD
@@ -258,9 +263,14 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["Games", "Matchups", "Teams", "Track record", "Injuries", "Player props"])
 
 with tab1:
-    sort_by = st.radio("Sort by", ["Date", "Points difference to spread"], horizontal=True)
-    if sort_by == "Date":
-        g = g.sort_values("gameday")
+    times_available = sorted(g["kickoff"].unique())
+    c1, c2 = st.columns([2, 1])
+    sort_by = c1.radio("Sort by", ["Kickoff time", "Points difference to spread"], horizontal=True)
+    time_pick = c2.multiselect("Kickoff time", times_available, default=times_available)
+
+    g = g[g["kickoff"].isin(time_pick)]
+    if sort_by == "Kickoff time":
+        g = g.sort_values(["gameday", "kickoff"])
     else:
         g = g.reindex(g["gap"].abs().sort_values(ascending=False, na_position="last").index)
 
@@ -271,7 +281,8 @@ with tab1:
             tags = []
             if div_col and r.get(div_col) == 1:
                 tags.append("Division game")
-            st.caption(str(r["gameday"]) + (" — " + ", ".join(tags) if tags else ""))
+            when = str(r["gameday"]) + (" at " + r["kickoff"] if r["kickoff"] != "TBD" else "")
+            st.caption(when + (" — " + ", ".join(tags) if tags else ""))
 
             c1, c2, c3 = st.columns(3)
             c1.metric("Market", fav(a, h, r["spread_line"]))
