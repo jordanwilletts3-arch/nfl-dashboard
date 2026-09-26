@@ -411,6 +411,12 @@ with tab6:
                 c2.metric(opp + " vs " + pos_key + " (rank, last 4)", "{} of 32".format(rank),
                            help="1 = toughest matchup (fewest yards allowed to this position), "
                                 "32 = easiest matchup.")
+                if rank <= 8:
+                    st.warning("Tough matchup — this defence has allowed the fewest yards to the position over its last 4 games.")
+                elif rank >= 25:
+                    st.success("Favourable matchup — this defence has allowed the most yards to the position over its last 4 games.")
+                else:
+                    st.caption("Middle-of-the-pack matchup — nothing unusual either way over the last 4 games.")
             else:
                 c2.metric("Opponent matchup", "n/a", help="Not enough data yet for this position or team.")
 
