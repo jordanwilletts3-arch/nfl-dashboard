@@ -16,7 +16,8 @@ COLS = ["season", "week", "season_type", "play_type", "epa", "wp", "posteam",
         "ydstogo", "yardline_100", "touchdown", "first_down"]
 LOG_PATH = Path("predictions_log.csv")
 BETS_PATH = Path("bets_log.csv")
-BET_COLS = ["id", "date_added", "game_date", "matchup", "bet", "tag", "odds", "stake", "status", "settled_date"]
+BET_COLS = ["id", "date_added", "game_date", "matchup", "bet_type", "bet", "legs",
+            "tag", "odds", "stake", "status", "settled_date"]
 
 DIV_ADJ = 4.0  # points shaved off the model's margin for division games — backtested on 2022-2025,
                # beat a random-games control, average miss improved from 10.36 to 10.18
@@ -168,15 +169,20 @@ def fill_results(log, sched):
 
 def load_bets():
     if BETS_PATH.exists():
-        return pd.read_csv(BETS_PATH)
+        b = pd.read_csv(BETS_PATH)
+        for c in BET_COLS:
+            if c not in b.columns:
+                b[c] = "Single" if c == "bet_type" else ""
+        return b[BET_COLS]
     return pd.DataFrame(columns=BET_COLS)
 
 
-def add_bet(bets, game_date, matchup, bet_desc, tag, odds, stake):
+def add_bet(bets, game_date, matchup, bet_type, bet_desc, legs, tag, odds, stake):
     next_id = int(bets["id"].max()) + 1 if not bets.empty else 1
     row = pd.DataFrame([{
         "id": next_id, "date_added": dt.date.today().isoformat(), "game_date": str(game_date),
-        "matchup": matchup, "bet": bet_desc, "tag": tag, "odds": odds, "stake": stake,
+        "matchup": matchup, "bet_type": bet_type, "bet": bet_desc, "legs": legs,
+        "tag": tag, "odds": odds, "stake": stake,
         "status": "Pending", "settled_date": "",
     }])
     bets = pd.concat([bets, row], ignore_index=True)
@@ -192,10 +198,9 @@ def settle_bet(bets, bet_id, status):
 
 
 def bet_profit(row):
-    """Profit/loss for one settled bet. Odds are entered American-style (+150, -110)."""
+    """Profit/loss for one settled bet. Odds are entered decimal-style (e.g. 1.91, 2.50, 8.40 for an acca)."""
     if row["status"] == "Won":
-        o = row["odds"]
-        return row["stake"] * (o / 100 if o > 0 else 100 / abs(o))
+        return row["stake"] * (row["odds"] - 1)
     if row["status"] == "Lost":
         return -row["stake"]
     return 0.0  # Pending or Push
@@ -485,20 +490,43 @@ with tab7:
     st.caption("Your own betting log — not the model's predictions. Saved on the app's own storage, which "
                "isn't guaranteed to survive every restart, so download a backup after adding bets.")
     bets = load_bets()
+    TAGS = ["JW", "RN", "Bet Club"]
+
+    bet_type = st.radio("Bet type", ["Single", "Player prop acca"], horizontal=True)
 
     with st.form("add_bet", clear_on_submit=True):
         st.subheader("Add a bet")
         c1, c2 = st.columns(2)
         game_date = c1.date_input("Game date")
-        tag = c2.selectbox("Tag", ["Personal", "Bet Club"])
-        matchup = st.text_input("Matchup (e.g. KC at MIA)")
-        bet_desc = st.text_input("What did you bet? (e.g. KC -10.0)")
+        tag = c2.selectbox("Tag", TAGS)
+        matchup = st.text_input("Matchup or slate (e.g. KC at MIA, or 'Sunday slate' for an acca)")
+
+        if bet_type == "Single":
+            bet_desc = st.text_input("What did you bet? (e.g. KC -10.0)")
+            legs = ""
+        else:
+            legs = st.text_area(
+                "Legs — one per line (e.g. Mahomes 250+ passing yards, Hill 5+ receptions)",
+                height=100,
+            )
+            bet_desc = ""
+
         c3, c4 = st.columns(2)
-        odds = c3.number_input("Odds (American, e.g. -110 or +150)", value=-110, step=5)
+        odds = c3.number_input("Odds (decimal, e.g. 1.91, or the combined price for an acca)",
+                                min_value=1.01, value=1.91, step=0.01, format="%.2f")
         stake = c4.number_input("Stake ($)", min_value=0.0, value=10.0, step=5.0)
-        if st.form_submit_button("Add bet") and matchup and bet_desc:
-            bets = add_bet(bets, game_date, matchup, bet_desc, tag, odds, stake)
-            st.success("Added.")
+
+        if st.form_submit_button("Add bet"):
+            if bet_type == "Single" and matchup and bet_desc:
+                bets = add_bet(bets, game_date, matchup, "Single", bet_desc, "", tag, odds, stake)
+                st.success("Added.")
+            elif bet_type == "Player prop acca" and matchup and legs.strip():
+                leg_list = [l.strip() for l in legs.splitlines() if l.strip()]
+                bet_desc = "Acca ({} legs)".format(len(leg_list))
+                bets = add_bet(bets, game_date, matchup, "Acca", bet_desc, "\n".join(leg_list), tag, odds, stake)
+                st.success("Added.")
+            else:
+                st.warning("Fill in the matchup and the bet (or legs) before adding.")
 
     if bets.empty:
         st.info("No bets logged yet.")
@@ -515,6 +543,10 @@ with tab7:
             options = pending["id"].astype(str) + " — " + pending["matchup"] + " (" + pending["bet"] + ")"
             pick = st.selectbox("Pick a bet", options)
             pick_id = int(pick.split(" — ")[0])
+            picked_row = pending[pending["id"] == pick_id].iloc[0]
+            if picked_row["bet_type"] == "Acca" and picked_row["legs"]:
+                with st.expander("Show legs"):
+                    st.text(picked_row["legs"])
             c1, c2, c3 = st.columns(3)
             if c1.button("Mark Won"):
                 bets = settle_bet(bets, pick_id, "Won")
@@ -527,7 +559,7 @@ with tab7:
                 st.rerun()
 
         st.subheader("Summary")
-        for label in ["Personal", "Bet Club"]:
+        for label in TAGS:
             sub = bets[bets["tag"] == label]
             if sub.empty:
                 continue
@@ -540,9 +572,16 @@ with tab7:
             c4.metric("Pending", int((sub["status"] == "Pending").sum()))
 
         st.subheader("All bets")
-        st.dataframe(
-            bets[["date_added", "game_date", "matchup", "bet", "tag", "odds", "stake", "status", "profit"]]
-            .sort_values("date_added", ascending=False),
-            hide_index=True, use_container_width=True,
-        )
+        view_cols = ["date_added", "game_date", "matchup", "bet_type", "bet", "tag",
+                     "odds", "stake", "status", "profit"]
+        st.dataframe(bets[view_cols].sort_values("date_added", ascending=False),
+                     hide_index=True, use_container_width=True)
+
+        acca_rows = bets[bets["bet_type"] == "Acca"]
+        if not acca_rows.empty:
+            with st.expander("Acca legs"):
+                for _, r in acca_rows.iterrows():
+                    st.write("**#{} — {} ({})**".format(int(r["id"]), r["matchup"], r["status"]))
+                    st.text(r["legs"])
+
         st.download_button("Download log as CSV", bets.to_csv(index=False), "bets_log.csv", "text/csv")
