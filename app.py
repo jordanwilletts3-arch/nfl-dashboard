@@ -1,4 +1,5 @@
 import datetime as dt
+import re
 from pathlib import Path
 
 import numpy as np
@@ -192,6 +193,38 @@ def save_prop_line(player, stat, line):
     lines = pd.concat([lines, row], ignore_index=True)
     lines.to_csv(PROP_LINES_PATH, index=False)
     return lines
+
+
+STAT_KEYWORDS = [
+    ("receiving yards", "Receiving yards"),
+    ("rushing yards", "Rushing yards"),
+    ("passing yards", "Passing yards"),
+    ("receptions", "Receptions"),
+]
+
+
+def parse_prop_list(text):
+    """Parse a pasted list like:
+    * Ja'Marr Chase (WR): Over/Under 82.5 Receiving Yards | Over/Under 6.5 Receptions
+    * Dawson Knox (TE): Receptions Under 1.5 (-189)
+    Returns a list of (player, stat, line) tuples. Lines that don't match a player/stat
+    pattern (team headers, blank lines) are silently skipped.
+    """
+    found = []
+    for raw in text.splitlines():
+        m = re.match(r"^\*?\s*(.+?)\s*\([A-Za-z]+\)\s*:\s*(.+)$", raw.strip())
+        if not m:
+            continue
+        player, rest = m.group(1).strip(), m.group(2)
+        for segment in rest.split("|"):
+            seg_lower = segment.lower()
+            stat_label = next((label for kw, label in STAT_KEYWORDS if kw in seg_lower), None)
+            if not stat_label:
+                continue
+            num = re.search(r"(\d+\.\d+)", segment)
+            if num:
+                found.append((player, stat_label, float(num.group(1))))
+    return found
 
 
 def add_bet(bets, game_date, matchup, bet_type, bet_desc, legs, tag, odds, stake):
@@ -472,7 +505,27 @@ with tab6:
             rows = rows[rows["player"].str.contains(search, case=False, na=False)]
         rows = rows.sort_values("avg", ascending=False).rename(columns={"avg": "Last-4-game average"})
 
-        st.subheader("Add or update a bookmaker's line")
+        st.subheader("Bulk-import bookmaker lines")
+        st.caption("Paste a list in the format: Player Name (POS): Over/Under 82.5 Receiving Yards | "
+                   "Over/Under 6.5 Receptions — one player per line, team headers and blank lines are "
+                   "ignored automatically. Works with Receiving yards, Rushing yards, Passing yards, "
+                   "and Receptions.")
+        bulk_text = st.text_area("Paste your list here", height=180, key="bulk_props_text")
+        if st.button("Import lines"):
+            parsed = parse_prop_list(bulk_text)
+            if not parsed:
+                st.warning("Couldn't find any recognisable player/stat lines in that text.")
+            else:
+                for player, stat, val in parsed:
+                    save_prop_line(player, stat, val)
+                prop_lines = load_prop_lines()
+                st.success("Imported {} lines.".format(len(parsed)))
+                with st.expander("Show what was imported"):
+                    st.dataframe(pd.DataFrame(parsed, columns=["player", "stat", "line"]),
+                                 hide_index=True, use_container_width=True)
+                st.rerun()
+
+        st.subheader("Add or update a single bookmaker line")
         c3, c4 = st.columns([3, 1])
         line_player = c3.selectbox("Player", rows["player"], key="line_player") if not rows.empty else None
         line_value = c4.number_input("Line", min_value=0.0, step=0.5, key="line_value")
