@@ -16,6 +16,7 @@ COLS = ["season", "week", "season_type", "play_type", "epa", "wp", "posteam",
         "ydstogo", "yardline_100", "touchdown", "first_down"]
 LOG_PATH = Path("predictions_log.csv")
 BETS_PATH = Path("bets_log.csv")
+PROP_LINES_PATH = Path("prop_lines.csv")
 BET_COLS = ["id", "date_added", "game_date", "matchup", "bet_type", "bet", "legs",
             "tag", "odds", "stake", "status", "settled_date"]
 
@@ -175,6 +176,22 @@ def load_bets():
                 b[c] = "Single" if c == "bet_type" else ""
         return b[BET_COLS]
     return pd.DataFrame(columns=BET_COLS)
+
+
+def load_prop_lines():
+    if PROP_LINES_PATH.exists():
+        return pd.read_csv(PROP_LINES_PATH)
+    return pd.DataFrame(columns=["player", "stat", "line", "updated"])
+
+
+def save_prop_line(player, stat, line):
+    lines = load_prop_lines()
+    lines = lines[~((lines["player"] == player) & (lines["stat"] == stat))]
+    row = pd.DataFrame([{"player": player, "stat": stat, "line": line,
+                          "updated": dt.date.today().isoformat()}])
+    lines = pd.concat([lines, row], ignore_index=True)
+    lines.to_csv(PROP_LINES_PATH, index=False)
+    return lines
 
 
 def add_bet(bets, game_date, matchup, bet_type, bet_desc, legs, tag, odds, stake):
@@ -440,6 +457,7 @@ with tab6:
                "you can weigh yourself, the same way the Matchups tab works for the spread. Neither is a tip, "
                "and single-game player stats are naturally noisy.")
     props, def_ranks = load_player_stats(SEASON)
+    prop_lines = load_prop_lines()
     if props.empty:
         st.info("No player stats available yet.")
     else:
@@ -453,12 +471,33 @@ with tab6:
         if search:
             rows = rows[rows["player"].str.contains(search, case=False, na=False)]
         rows = rows.sort_values("avg", ascending=False).rename(columns={"avg": "Last-4-game average"})
-        st.dataframe(rows[["player", "team", "position", "Last-4-game average"]].round(1),
-                     hide_index=True, use_container_width=True)
+
+        st.subheader("Add or update a bookmaker's line")
+        c3, c4 = st.columns([3, 1])
+        line_player = c3.selectbox("Player", rows["player"], key="line_player") if not rows.empty else None
+        line_value = c4.number_input("Line", min_value=0.0, step=0.5, key="line_value")
+        if st.button("Save line") and line_player:
+            prop_lines = save_prop_line(line_player, stat_pick, line_value)
+            st.success("Saved.")
+            st.rerun()
+
+        this_stat_lines = prop_lines[prop_lines["stat"] == stat_pick][["player", "line"]]
+        rows = rows.merge(this_stat_lines, on="player", how="left").rename(columns={"line": "Bookmaker line"})
+        rows["Difference"] = rows["Last-4-game average"] - rows["Bookmaker line"]
+
+        st.subheader("Projections vs bookmaker lines")
+        st.caption("Difference is the average minus the line — positive means the average sits over the line, "
+                   "negative means under. Blank means no line has been entered for that player yet.")
+        display_cols = ["player", "team", "position", "Last-4-game average", "Bookmaker line", "Difference"]
+        st.dataframe(
+            rows[display_cols].round(1).style.background_gradient(
+                cmap="RdYlGn", subset=["Difference"], vmin=-10, vmax=10),
+            hide_index=True, use_container_width=True,
+        )
 
         st.caption("Pick a player and their upcoming opponent to see the matchup context alongside their average.")
         if not rows.empty:
-            chosen = st.selectbox("Player", rows["player"])
+            chosen = st.selectbox("Player", rows["player"], key="detail_player")
             prow = rows[rows["player"] == chosen].iloc[0]
             opp = st.selectbox("This week's opponent", sorted(net.index))
             pos_key = prow["position"] if prow["position"] in def_ranks else None
@@ -479,54 +518,78 @@ with tab6:
             else:
                 c2.metric("Opponent matchup", "n/a", help="Not enough data yet for this position or team.")
 
-            st.caption("Enter a bookmaker's line to compare it against the average above (the average, "
-                       "not the matchup rank, is the tested number).")
-            line = st.number_input("Bookmaker's prop line", min_value=0.0, step=0.5)
-            if line > 0:
-                st.metric("Average vs line", "{:+.1f}".format(prow["Last-4-game average"] - line),
-                          delta="{} the line".format("Over" if prow["Last-4-game average"] > line else "Under"))
+            if pd.notna(prow["Bookmaker line"]):
+                st.metric("Average vs saved line", "{:+.1f}".format(prow["Difference"]),
+                          delta="{} the line".format("Over" if prow["Difference"] > 0 else "Under"))
+            else:
+                st.caption("No line saved yet for this player at this stat — add one above.")
 
 with tab7:
     st.caption("Your own betting log — not the model's predictions. Saved on the app's own storage, which "
                "isn't guaranteed to survive every restart, so download a backup after adding bets.")
     bets = load_bets()
     TAGS = ["JW", "RN", "Bet Club"]
+    if "acca_legs" not in st.session_state:
+        st.session_state.acca_legs = []
 
-    bet_type = st.radio("Bet type", ["Single", "Player prop acca"], horizontal=True)
+    st.subheader("Add a bet")
+    bet_type = st.radio("Bet type", ["Single", "Player prop acca"], horizontal=True, key="bet_type_pick")
+    c1, c2 = st.columns(2)
+    game_date = c1.date_input("Game date", key="bet_date")
+    tag = c2.selectbox("Tag", TAGS, key="bet_tag")
+    matchup = st.text_input("Matchup or slate (e.g. KC at MIA, or 'Sunday slate' for an acca)", key="bet_matchup")
 
-    with st.form("add_bet", clear_on_submit=True):
-        st.subheader("Add a bet")
-        c1, c2 = st.columns(2)
-        game_date = c1.date_input("Game date")
-        tag = c2.selectbox("Tag", TAGS)
-        matchup = st.text_input("Matchup or slate (e.g. KC at MIA, or 'Sunday slate' for an acca)")
-
-        if bet_type == "Single":
-            bet_desc = st.text_input("What did you bet? (e.g. KC -10.0)")
-            legs = ""
-        else:
-            legs = st.text_area(
-                "Legs — one per line (e.g. Mahomes 250+ passing yards, Hill 5+ receptions)",
-                height=100,
-            )
-            bet_desc = ""
-
+    if bet_type == "Single":
+        bet_desc = st.text_input("What did you bet? (e.g. KC -10.0)", key="bet_desc")
         c3, c4 = st.columns(2)
-        odds = c3.number_input("Odds (decimal, e.g. 1.91, or the combined price for an acca)",
-                                min_value=1.01, value=1.91, step=0.01, format="%.2f")
-        stake = c4.number_input("Stake ($)", min_value=0.0, value=10.0, step=5.0)
-
-        if st.form_submit_button("Add bet"):
-            if bet_type == "Single" and matchup and bet_desc:
+        odds = c3.number_input("Odds (decimal, e.g. 1.91)", min_value=1.01, value=1.91, step=0.01,
+                                format="%.2f", key="single_odds")
+        stake = c4.number_input("Stake ($)", min_value=0.0, value=10.0, step=5.0, key="single_stake")
+        if st.button("Add bet"):
+            if matchup and bet_desc:
                 bets = add_bet(bets, game_date, matchup, "Single", bet_desc, "", tag, odds, stake)
                 st.success("Added.")
-            elif bet_type == "Player prop acca" and matchup and legs.strip():
-                leg_list = [l.strip() for l in legs.splitlines() if l.strip()]
-                bet_desc = "Acca ({} legs)".format(len(leg_list))
-                bets = add_bet(bets, game_date, matchup, "Acca", bet_desc, "\n".join(leg_list), tag, odds, stake)
-                st.success("Added.")
+                st.rerun()
             else:
-                st.warning("Fill in the matchup and the bet (or legs) before adding.")
+                st.warning("Fill in the matchup and the bet before adding.")
+
+    else:
+        st.write("Build the acca one prop line at a time, then save the whole bet below.")
+        c5, c6 = st.columns([3, 1])
+        new_leg = c5.text_input("Add a prop line (e.g. Mahomes 250+ passing yards)", key="new_leg_text")
+        if c6.button("Add leg") and new_leg.strip():
+            st.session_state.acca_legs.append(new_leg.strip())
+            st.session_state.new_leg_text = ""
+            st.rerun()
+
+        if st.session_state.acca_legs:
+            st.write("**Current legs:**")
+            for i, leg in enumerate(st.session_state.acca_legs):
+                lc1, lc2 = st.columns([5, 1])
+                lc1.write(str(i + 1) + ". " + leg)
+                if lc2.button("Remove", key="remove_leg_" + str(i)):
+                    st.session_state.acca_legs.pop(i)
+                    st.rerun()
+        else:
+            st.caption("No legs added yet.")
+
+        c3, c4 = st.columns(2)
+        odds = c3.number_input("Combined odds (decimal, e.g. 8.40)", min_value=1.01, value=1.91, step=0.01,
+                                format="%.2f", key="acca_odds")
+        stake = c4.number_input("Stake ($)", min_value=0.0, value=10.0, step=5.0, key="acca_stake")
+
+        if st.button("Add acca"):
+            if matchup and st.session_state.acca_legs:
+                bet_desc = "Acca ({} legs)".format(len(st.session_state.acca_legs))
+                legs_str = "\n".join(st.session_state.acca_legs)
+                bets = add_bet(bets, game_date, matchup, "Acca", bet_desc, legs_str, tag, odds, stake)
+                st.session_state.acca_legs = []
+                st.success("Added.")
+                st.rerun()
+            else:
+                st.warning("Add the matchup/slate and at least one leg before saving.")
+
+    st.divider()
 
     if bets.empty:
         st.info("No bets logged yet.")
