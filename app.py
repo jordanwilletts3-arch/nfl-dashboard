@@ -250,6 +250,14 @@ def settle_bet(bets, bet_id, status):
     return bets
 
 
+def add_leg_callback():
+    """Runs before the page redraws, so it can safely append the leg and clear the text box."""
+    leg = st.session_state.get("new_leg_text", "").strip()
+    if leg:
+        st.session_state.setdefault("acca_legs", []).append(leg)
+        st.session_state.new_leg_text = ""
+
+
 def bet_profit(row):
     """Profit/loss for one settled bet. Odds are entered decimal-style (e.g. 1.91, 2.50, 8.40 for an acca)."""
     if row["status"] == "Won":
@@ -612,11 +620,8 @@ with tab7:
     else:
         st.write("Build the acca one prop line at a time, then save the whole bet below.")
         c5, c6 = st.columns([3, 1])
-        new_leg = c5.text_input("Add a prop line (e.g. Mahomes 250+ passing yards)", key="new_leg_text")
-        if c6.button("Add leg") and new_leg.strip():
-            st.session_state.acca_legs.append(new_leg.strip())
-            st.session_state.new_leg_text = ""
-            st.rerun()
+        c5.text_input("Add a prop line (e.g. Mahomes 250+ passing yards)", key="new_leg_text")
+        c6.button("Add leg", on_click=add_leg_callback)
 
         if st.session_state.acca_legs:
             st.write("**Current legs:**")
