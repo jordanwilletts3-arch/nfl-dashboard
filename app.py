@@ -175,6 +175,9 @@ def load_bets():
         for c in BET_COLS:
             if c not in b.columns:
                 b[c] = "Single" if c == "bet_type" else ""
+        text_cols = ["game_date", "matchup", "bet_type", "bet", "legs", "tag", "status", "settled_date", "date_added"]
+        for c in text_cols:
+            b[c] = b[c].fillna("").astype(str)
         return b[BET_COLS]
     return pd.DataFrame(columns=BET_COLS)
 
