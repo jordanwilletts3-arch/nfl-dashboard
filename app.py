@@ -41,6 +41,12 @@ def _read_store():
         return dict(EMPTY_STORE)
 
 
+def _to_records(df):
+    """DataFrame -> list of dicts, with NaN/NaT replaced by None so the result is valid JSON
+    (the requests library rejects NaN outright when sending a json= payload)."""
+    return df.astype(object).where(pd.notnull(df), None).to_dict("records")
+
+
 def _write_store(store):
     """Saves the full store back to JSONBin and clears the cache so the next read is fresh."""
     if not REMOTE_CONFIGURED:
@@ -189,7 +195,7 @@ def log_predictions(g, season, week):
     if not new_rows.empty:
         new_rows["result"] = np.nan
         combined = pd.concat([existing, new_rows], ignore_index=True) if not existing.empty else new_rows
-        store["predictions"] = combined.to_dict("records")
+        store["predictions"] = _to_records(combined)
         _write_store(store)
         return combined
     return existing
@@ -205,7 +211,7 @@ def fill_results(log, sched):
     )
     if not merged["result"].equals(log["result"]):
         store = _read_store()
-        store["predictions"] = merged.to_dict("records")
+        store["predictions"] = _to_records(merged)
         _write_store(store)
     return merged
 
@@ -240,7 +246,7 @@ def save_prop_line(player, stat, line):
     row = pd.DataFrame([{"player": player, "stat": stat, "line": line,
                           "updated": dt.date.today().isoformat()}])
     lines = pd.concat([lines, row], ignore_index=True) if not lines.empty else row
-    store["prop_lines"] = lines.to_dict("records")
+    store["prop_lines"] = _to_records(lines)
     _write_store(store)
     return lines
 
@@ -287,7 +293,7 @@ def add_bet(bets, game_date, matchup, bet_type, bet_desc, legs, tag, odds, stake
     }])
     bets = pd.concat([bets, row], ignore_index=True) if not bets.empty else row
     store = _read_store()
-    store["bets"] = bets.to_dict("records")
+    store["bets"] = _to_records(bets)
     _write_store(store)
     return bets
 
@@ -296,7 +302,7 @@ def settle_bet(bets, bet_id, status):
     bets.loc[bets["id"] == bet_id, "status"] = status
     bets.loc[bets["id"] == bet_id, "settled_date"] = dt.date.today().isoformat()
     store = _read_store()
-    store["bets"] = bets.to_dict("records")
+    store["bets"] = _to_records(bets)
     _write_store(store)
     return bets
 
