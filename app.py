@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import nflreadpy as nfl
 from sklearn.linear_model import Ridge
@@ -15,11 +16,43 @@ SEASON = today.year if today.month >= 3 else today.year - 1
 COLS = ["season", "week", "season_type", "play_type", "epa", "wp", "posteam",
         "defteam", "success", "yards_gained", "down", "game_id",
         "ydstogo", "yardline_100", "touchdown", "first_down"]
-LOG_PATH = Path("predictions_log.csv")
-BETS_PATH = Path("bets_log.csv")
-PROP_LINES_PATH = Path("prop_lines.csv")
 BET_COLS = ["id", "date_added", "game_date", "matchup", "bet_type", "bet", "legs",
             "tag", "odds", "stake", "status", "settled_date"]
+
+JSONBIN_ID = st.secrets.get("JSONBIN_BIN_ID", "")
+JSONBIN_KEY = st.secrets.get("JSONBIN_API_KEY", "")
+JSONBIN_URL = "https://api.jsonbin.io/v3/b/" + JSONBIN_ID
+REMOTE_CONFIGURED = bool(JSONBIN_ID) and bool(JSONBIN_KEY)
+EMPTY_STORE = {"predictions": [], "bets": [], "prop_lines": []}
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _read_store():
+    """Loads all saved app data (predictions, bets, prop lines) from JSONBin.
+    Falls back to an empty store if secrets aren't set up yet, so the app still runs."""
+    if not REMOTE_CONFIGURED:
+        return dict(EMPTY_STORE)
+    try:
+        r = requests.get(JSONBIN_URL + "/latest", headers={"X-Master-Key": JSONBIN_KEY}, timeout=10)
+        r.raise_for_status()
+        record = r.json().get("record", {})
+        return {**EMPTY_STORE, **record}
+    except Exception:
+        return dict(EMPTY_STORE)
+
+
+def _write_store(store):
+    """Saves the full store back to JSONBin and clears the cache so the next read is fresh."""
+    if not REMOTE_CONFIGURED:
+        st.warning("Storage isn't set up yet (missing JSONBin secrets), so this change won't be saved "
+                   "between visits. See the setup steps to fix this.")
+        return
+    try:
+        requests.put(JSONBIN_URL, headers={"X-Master-Key": JSONBIN_KEY, "Content-Type": "application/json"},
+                     json=store, timeout=10)
+    except Exception as e:
+        st.error("Couldn't save to storage: " + str(e))
+    _read_store.clear()
 
 DIV_ADJ = 4.0  # points shaved off the model's margin for division games — backtested on 2022-2025,
                # beat a random-games control, average miss improved from 10.36 to 10.18
@@ -144,57 +177,71 @@ def log_predictions(g, season, week):
     """Append this week's predictions to the log once, skipping games already logged."""
     cols = ["season", "week", "gameday", "away_team", "home_team", "spread_line", "model_margin"]
     new_rows = g.rename(columns={"model": "model_margin"})[cols].copy()
-    if LOG_PATH.exists():
-        existing = pd.read_csv(LOG_PATH)
+    new_rows["gameday"] = new_rows["gameday"].astype(str)
+
+    store = _read_store()
+    existing = pd.DataFrame(store.get("predictions", []))
+    if not existing.empty:
         key = ["season", "week", "away_team", "home_team"]
         already = existing.set_index(key).index
         new_rows = new_rows[~new_rows.set_index(key).index.isin(already)]
-        if not new_rows.empty:
-            new_rows["result"] = np.nan
-            existing = pd.concat([existing, new_rows], ignore_index=True)
-    else:
+
+    if not new_rows.empty:
         new_rows["result"] = np.nan
-        existing = new_rows
-    existing.to_csv(LOG_PATH, index=False)
+        combined = pd.concat([existing, new_rows], ignore_index=True) if not existing.empty else new_rows
+        store["predictions"] = combined.to_dict("records")
+        _write_store(store)
+        return combined
     return existing
 
 
 def fill_results(log, sched):
     """Fill in final results for logged games that have since been played."""
+    if log.empty:
+        return log
     done = sched.dropna(subset=["result"])[["season", "week", "away_team", "home_team", "result"]]
-    log = log.drop(columns=["result"]).merge(
+    merged = log.drop(columns=["result"]).merge(
         done, on=["season", "week", "away_team", "home_team"], how="left"
     )
-    log.to_csv(LOG_PATH, index=False)
-    return log
+    if not merged["result"].equals(log["result"]):
+        store = _read_store()
+        store["predictions"] = merged.to_dict("records")
+        _write_store(store)
+    return merged
 
 
 def load_bets():
-    if BETS_PATH.exists():
-        b = pd.read_csv(BETS_PATH)
-        for c in BET_COLS:
-            if c not in b.columns:
-                b[c] = "Single" if c == "bet_type" else ""
-        text_cols = ["game_date", "matchup", "bet_type", "bet", "legs", "tag", "status", "settled_date", "date_added"]
-        for c in text_cols:
-            b[c] = b[c].fillna("").astype(str)
-        return b[BET_COLS]
-    return pd.DataFrame(columns=BET_COLS)
+    store = _read_store()
+    b = pd.DataFrame(store.get("bets", []))
+    if b.empty:
+        return pd.DataFrame(columns=BET_COLS)
+    for c in BET_COLS:
+        if c not in b.columns:
+            b[c] = "Single" if c == "bet_type" else ""
+    text_cols = ["game_date", "matchup", "bet_type", "bet", "legs", "tag", "status", "settled_date", "date_added"]
+    for c in text_cols:
+        b[c] = b[c].fillna("").astype(str)
+    return b[BET_COLS]
 
 
 def load_prop_lines():
-    if PROP_LINES_PATH.exists():
-        return pd.read_csv(PROP_LINES_PATH)
-    return pd.DataFrame(columns=["player", "stat", "line", "updated"])
+    store = _read_store()
+    lines = pd.DataFrame(store.get("prop_lines", []))
+    if lines.empty:
+        return pd.DataFrame(columns=["player", "stat", "line", "updated"])
+    return lines
 
 
 def save_prop_line(player, stat, line):
-    lines = load_prop_lines()
-    lines = lines[~((lines["player"] == player) & (lines["stat"] == stat))]
+    store = _read_store()
+    lines = pd.DataFrame(store.get("prop_lines", []))
+    if not lines.empty:
+        lines = lines[~((lines["player"] == player) & (lines["stat"] == stat))]
     row = pd.DataFrame([{"player": player, "stat": stat, "line": line,
                           "updated": dt.date.today().isoformat()}])
-    lines = pd.concat([lines, row], ignore_index=True)
-    lines.to_csv(PROP_LINES_PATH, index=False)
+    lines = pd.concat([lines, row], ignore_index=True) if not lines.empty else row
+    store["prop_lines"] = lines.to_dict("records")
+    _write_store(store)
     return lines
 
 
@@ -238,15 +285,19 @@ def add_bet(bets, game_date, matchup, bet_type, bet_desc, legs, tag, odds, stake
         "tag": tag, "odds": odds, "stake": stake,
         "status": "Pending", "settled_date": "",
     }])
-    bets = pd.concat([bets, row], ignore_index=True)
-    bets.to_csv(BETS_PATH, index=False)
+    bets = pd.concat([bets, row], ignore_index=True) if not bets.empty else row
+    store = _read_store()
+    store["bets"] = bets.to_dict("records")
+    _write_store(store)
     return bets
 
 
 def settle_bet(bets, bet_id, status):
     bets.loc[bets["id"] == bet_id, "status"] = status
     bets.loc[bets["id"] == bet_id, "settled_date"] = dt.date.today().isoformat()
-    bets.to_csv(BETS_PATH, index=False)
+    store = _read_store()
+    store["bets"] = bets.to_dict("records")
+    _write_store(store)
     return bets
 
 
@@ -458,8 +509,12 @@ with tab3:
         st.dataframe(raw_pct.sort_index().round(0), use_container_width=True)
 
 with tab4:
-    st.caption("Every prediction the model has made this season, checked against results once games finish. "
-               "This log lives on the app's own storage, so a redeploy or long period of inactivity can reset it.")
+    if REMOTE_CONFIGURED:
+        st.caption("Every prediction the model has made this season, checked against results once games "
+                   "finish. Saved to persistent cloud storage, so it survives app restarts.")
+    else:
+        st.error("Storage isn't set up yet, so this log won't be saved between visits. "
+                 "See the setup steps to connect persistent storage.")
     played = log.dropna(subset=["result"]).copy()
     if played.empty:
         st.info("No completed games logged yet this season. Check back once this week's games are played.")
@@ -589,8 +644,12 @@ with tab6:
                 st.caption("No line saved yet for this player at this stat — add one above.")
 
 with tab7:
-    st.caption("Your own betting log — not the model's predictions. Saved on the app's own storage, which "
-               "isn't guaranteed to survive every restart, so download a backup after adding bets.")
+    if REMOTE_CONFIGURED:
+        st.caption("Your own betting log — not the model's predictions. Saved to persistent cloud storage, "
+                   "so it survives app restarts.")
+    else:
+        st.error("Storage isn't set up yet, so nothing added here will be saved between visits. "
+                 "See the setup steps to connect persistent storage.")
     bets = load_bets()
     TAGS = ["JW", "RN", "Bet Club"]
     if "acca_legs" not in st.session_state:
