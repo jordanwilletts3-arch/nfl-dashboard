@@ -139,6 +139,33 @@ def load(season):
     return pbp, sched, injuries
 
 
+def plain_english(a, h, r):
+    """One or two plain sentences describing what the model and market each think about a game."""
+    market_pick = fav(a, h, r["spread_line"])
+    model_pick = fav(a, h, r["model"])
+    sentence = "**{} at {}** — the bookies have **{}**.".format(a, h, market_pick)
+
+    if pd.isna(r["gap"]):
+        sentence += " The model doesn't have an opinion on this one yet."
+        return sentence
+
+    gap = abs(r["gap"])
+    leaning = h if r["gap"] > 0 else a
+    if gap < 1:
+        sentence += " The model sees it almost exactly the same way."
+    elif gap < 3:
+        sentence += " The model agrees, but likes {} *slightly* more than the market does.".format(leaning)
+    elif gap < 5:
+        sentence += " The model thinks it's closer than that, leaning a bit more toward **{}**.".format(leaning)
+    else:
+        sentence += (" The model disagrees quite a bit, leaning toward **{}** by about {:.0f} points more "
+                     "than the market does. That's a big gap — in testing, gaps this size were wrong "
+                     "more often than they were right, so it's usually a sign the model is missing "
+                     "something (an injury or a lineup change), not a sign it's found value.").format(
+            leaning, gap)
+    return sentence
+
+
 def fav(a, h, m):
     if pd.isna(m):
         return "n/a"
@@ -428,6 +455,8 @@ with tab1:
     c1, c2 = st.columns([2, 1])
     sort_by = c1.radio("Sort by", ["Kickoff time", "Points difference to spread"], horizontal=True)
     time_pick = c2.multiselect("Kickoff time", times_available, default=times_available, key="games_time")
+    simple_view = st.toggle("Plain English view", value=False,
+                             help="Shows each game as a couple of plain sentences instead of the full card.")
 
     g1 = g_all[g_all["kickoff"].isin(time_pick)]
     if sort_by == "Kickoff time":
@@ -435,39 +464,53 @@ with tab1:
     else:
         g1 = g1.reindex(g1["gap"].abs().sort_values(ascending=False, na_position="last").index)
 
-    for _, r in g1.iterrows():
-        a, h = r["away_team"], r["home_team"]
-        with st.container(border=True):
-            st.subheader(a + " at " + h)
-            tags = []
-            if div_col and r.get(div_col) == 1:
-                tags.append("Division game")
+    if simple_view:
+        st.caption("This isn't a tip — it's the same comparison as the full game cards, just worded simply. "
+                   "The model has never beaten the bookmakers in testing, so treat it as a second opinion "
+                   "to weigh, not an answer.")
+        for _, r in g1.iterrows():
+            a, h = r["away_team"], r["home_team"]
             when = str(r["gameday"]) + (" at " + r["kickoff"] if r["kickoff"] != "TBD" else "")
-            st.caption(when + (" — " + ", ".join(tags) if tags else ""))
+            with st.container(border=True):
+                st.caption(when)
+                st.write(plain_english(a, h, r))
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Market", fav(a, h, r["spread_line"]))
-            c2.metric("Model", fav(a, h, r["model"]))
-            c3.metric("Total", "-" if pd.isna(r["total_line"]) else str(r["total_line"]))
+    else:
+        for _, r in g1.iterrows():
+            a, h = r["away_team"], r["home_team"]
+            with st.container(border=True):
+                st.subheader(a + " at " + h)
+                tags = []
+                if div_col and r.get(div_col) == 1:
+                    tags.append("Division game")
+                when = str(r["gameday"]) + (" at " + r["kickoff"] if r["kickoff"] != "TBD" else "")
+                st.caption(when + (" — " + ", ".join(tags) if tags else ""))
 
-            if pd.notna(r["gap"]):
-                st.write("Model vs market: {:.1f} pts toward {}".format(abs(r["gap"]), h if r["gap"] > 0 else a))
-                if abs(r["gap"]) >= 5:
-                    st.warning("Big gap. Check injury and lineup news before trusting it.")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Market", fav(a, h, r["spread_line"]))
+                c2.metric("Model", fav(a, h, r["model"]))
+                c3.metric("Total", "-" if pd.isna(r["total_line"]) else str(r["total_line"]))
 
-            if r["div_adj"] != 0:
-                st.caption("Includes a division-game adjustment of {:+.1f} pts (backtested).".format(r["div_adj"]))
+                if pd.notna(r["gap"]):
+                    st.write("Model vs market: {:.1f} pts toward {}".format(
+                        abs(r["gap"]), h if r["gap"] > 0 else a))
+                    if abs(r["gap"]) >= 5:
+                        st.warning("Big gap. Check injury and lineup news before trusting it.")
 
-            st.caption("{} vs {}. Rest {} and {} days.".format(
-                r.get("away_qb_name", "?"), r.get("home_qb_name", "?"),
-                r.get("away_rest", "?"), r.get("home_rest", "?")))
+                if r["div_adj"] != 0:
+                    st.caption("Includes a division-game adjustment of {:+.1f} pts (backtested).".format(
+                        r["div_adj"]))
 
-            if not inj.empty:
-                a_off, a_def = (inj.loc[a, "off"], inj.loc[a, "def"]) if a in inj.index else (0, 0)
-                h_off, h_def = (inj.loc[h, "off"], inj.loc[h, "def"]) if h in inj.index else (0, 0)
-                if a_off + a_def + h_off + h_def > 0:
-                    st.caption("Out/doubtful — {}: {} offence, {} defence. {}: {} offence, {} defence.".format(
-                        a, a_off, a_def, h, h_off, h_def))
+                st.caption("{} vs {}. Rest {} and {} days.".format(
+                    r.get("away_qb_name", "?"), r.get("home_qb_name", "?"),
+                    r.get("away_rest", "?"), r.get("home_rest", "?")))
+
+                if not inj.empty:
+                    a_off, a_def = (inj.loc[a, "off"], inj.loc[a, "def"]) if a in inj.index else (0, 0)
+                    h_off, h_def = (inj.loc[h, "off"], inj.loc[h, "def"]) if h in inj.index else (0, 0)
+                    if a_off + a_def + h_off + h_def > 0:
+                        st.caption("Out/doubtful — {}: {} offence, {} defence. {}: {} offence, {} defence.".format(
+                            a, a_off, a_def, h, h_off, h_def))
 
             if not inj_players.empty:
                 game_players = inj_players[inj_players["team"].isin([a, h])]
